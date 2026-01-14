@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const twilio = require('twilio'); // WICHTIG: hinzufügen!
 
 const app = express();
 app.use(cors());
@@ -24,11 +25,28 @@ function handleTokenRequest(req, res) {
       return res.status(400).json({ error: 'identity and room are required' });
     }
 
-    // TODO: Hier später deine echte Token-Logik (z.B. Twilio)
-    const jwt = `FAKE_TOKEN_FOR_${identity}_IN_${room}_${Date.now()}`;
+    // ECHTE Twilio-Token-Logik
+    const AccessToken = twilio.jwt.AccessToken;
+    const VideoGrant = AccessToken.VideoGrant;
 
-    console.log('Token erfolgreich erstellt für', identity, 'in Raum', room);
+    // Token-Objekt erstellen
+    const token = new AccessToken(
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_API_KEY_SID,
+      process.env.TWILIO_API_KEY_SECRET,
+      { identity }
+    );
+
+    // Dem Token Zugriff auf diesen Raum geben
+    const videoGrant = new VideoGrant({ room });
+    token.addGrant(videoGrant);
+
+    // In JWT umwandeln
+    const jwt = token.toJwt();
+
+    console.log('Twilio-Token erstellt für', identity, 'in Raum', room);
     return res.json({ token: jwt });
+
   } catch (err) {
     console.error('Fehler beim Erzeugen des Tokens:', err);
     return res.status(500).json({ error: 'token_error' });
@@ -46,3 +64,4 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Server läuft auf Port ${port}`);
 });
+
