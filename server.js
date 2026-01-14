@@ -95,40 +95,65 @@ function ensureUser(username) {
 // Auth
 // --------------------------------------
 //
+// POST /register { username, password }
+// – existiert user bereits: 409
+// – sonst: neuer User
+//
 // POST /login { username, password }
-// – existiert user nicht: wird erstellt
-// – existiert user + falsches passwort: 401
+// – existiert user nicht: 404
+// – passwort falsch: 401
+
+app.post('/register', (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res
+      .status(400)
+      .json({ error: 'username dhe password jonë të domosdoshëm' });
+  }
+
+  const name = username.trim().toLowerCase();
+
+  if (users.has(name)) {
+    return res
+      .status(409)
+      .json({ error: 'ky username veç osht i zënë, zgjidh tjeter' });
+  }
+
+  const user = {
+    password,
+    friends: new Set(),
+    incoming: new Set(),
+    outgoing: new Set()
+  };
+  users.set(name, user);
+
+  console.log(`👤 New user registered: ${name}`);
+
+  res.json({ username: name });
+});
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res
       .status(400)
-      .json({ error: 'username und password sind nötig' });
+      .json({ error: 'username dhe password jonë të domosdoshëm' });
   }
 
   const name = username.trim().toLowerCase();
-  let user = users.get(name);
+  const user = users.get(name);
 
   if (!user) {
-    // Neuer User
-    user = {
-      password,
-      friends: new Set(),
-      incoming: new Set(),
-      outgoing: new Set()
-    };
-    users.set(name, user);
-    console.log(`👤 New user registered: ${name}`);
-  } else {
-    if (user.password !== password) {
-      return res.status(401).json({ error: 'password falsch' });
-    }
+    return res
+      .status(404)
+      .json({ error: 'ky user nuk ekziston – krijo account se pari' });
   }
 
-  res.json({
-    username: name
-  });
+  if (user.password !== password) {
+    return res.status(401).json({ error: 'password gabim' });
+  }
+
+  res.json({ username: name });
 });
 
 // --------------------------------------
