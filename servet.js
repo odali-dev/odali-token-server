@@ -1,62 +1,48 @@
-const express = require("express");
-const cors = require("cors");
-const { config } = require("dotenv");
-const { jwt } = require("twilio");
-
-const { AccessToken } = jwt;
-const { VideoGrant } = AccessToken;
-
-// .env-Variablen laden (Render liest die Environment Variables)
-config();
+const express = require('express');
+const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Healthcheck – zum Testen im Browser
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
+// Healthcheck / Test
+app.get('/', (req, res) => {
+  res.send('Token-Server läuft 🚀');
 });
 
-// Token-Endpoint
-app.post("/video-token", (req, res) => {
+// gemeinsame Handler-Funktion für GET & POST /token
+function handleTokenRequest(req, res) {
   try {
-    const { identity, roomName } = req.body;
+    // Bei GET kommen die Daten aus query, bei POST aus body
+    const identity = req.body.identity || req.query.identity;
+    const room = req.body.room || req.query.room;
 
-    if (!identity || !roomName) {
-      return res
-        .status(400)
-        .json({ error: "identity und roomName sind Pflicht" });
+    console.log('Token-Request:', { identity, room, time: new Date().toISOString() });
+
+    if (!identity || !room) {
+      console.log('Fehler: identity oder room fehlt');
+      return res.status(400).json({ error: 'identity and room are required' });
     }
 
-    const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const apiKeySid = process.env.TWILIO_API_KEY_SID;
-    const apiKeySecret = process.env.TWILIO_API_KEY_SECRET;
+    // TODO: Hier später deine echte Token-Logik (z.B. Twilio)
+    const jwt = `FAKE_TOKEN_FOR_${identity}_IN_${room}_${Date.now()}`;
 
-    if (!accountSid || !apiKeySid || !apiKeySecret) {
-      console.error("Twilio-Env-Variablen fehlen");
-      return res
-        .status(500)
-        .json({ error: "Server falsch konfiguriert (Twilio-Keys fehlen)" });
-    }
-
-    // AccessToken bauen
-    const token = new AccessToken(accountSid, apiKeySid, apiKeySecret, {
-      identity,
-    });
-
-    const videoGrant = new VideoGrant({ room: roomName });
-    token.addGrant(videoGrant);
-
-    res.json({ token: token.toJwt() });
+    console.log('Token erfolgreich erstellt für', identity, 'in Raum', room);
+    return res.json({ token: jwt });
   } catch (err) {
-    console.error("Fehler beim Token-Bau:", err);
-    res.status(500).json({ error: "Interner Serverfehler" });
+    console.error('Fehler beim Erzeugen des Tokens:', err);
+    return res.status(500).json({ error: 'token_error' });
   }
-});
+}
 
-// Render setzt PORT als Env-Variable
+// Akzeptiere GET /token (z.B. wenn Frontend fetch ohne body macht)
+app.get('/token', handleTokenRequest);
+
+// Akzeptiere POST /token (sauberer für echte Nutzung)
+app.post('/token', handleTokenRequest);
+
+// WICHTIG: Render-Port verwenden
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`Odali Token Server läuft auf Port ${port}`);
+  console.log(`Server läuft auf Port ${port}`);
 });
