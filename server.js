@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const twilio = require('twilio'); // WICHTIG: hinzufügen!
+const twilio = require('twilio'); // Twilio SDK
 
 const app = express();
 app.use(cors());
@@ -22,19 +22,35 @@ function handleTokenRequest(req, res) {
 
     if (!identity || !room) {
       console.log('Fehler: identity oder room fehlt');
-      return res.status(400).json({ error: 'identity and room are required' });
+      return res.status(400).json({ error: 'identity_and_room_required' });
     }
 
-    // ECHTE Twilio-Token-Logik
+    // 🔎 Twilio-Env-Variablen prüfen
+    const {
+      TWILIO_ACCOUNT_SID,
+      TWILIO_API_KEY_SID,
+      TWILIO_API_KEY_SECRET,
+    } = process.env;
+
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_API_KEY_SID || !TWILIO_API_KEY_SECRET) {
+      console.error('Fehlende Twilio-Env-Variablen', {
+        hasAccountSid: !!TWILIO_ACCOUNT_SID,
+        hasApiKeySid: !!TWILIO_API_KEY_SID,
+        hasApiKeySecret: !!TWILIO_API_KEY_SECRET,
+      });
+      return res.status(500).json({ error: 'missing_twilio_env_vars' });
+    }
+
+    // ✅ ECHTE Twilio-Token-Logik
     const AccessToken = twilio.jwt.AccessToken;
     const VideoGrant = AccessToken.VideoGrant;
 
     // Token-Objekt erstellen
     const token = new AccessToken(
-      process.env.TWILIO_ACCOUNT_SID,
-      process.env.TWILIO_API_KEY_SID,
-      process.env.TWILIO_API_KEY_SECRET,
-      { identity }
+      TWILIO_ACCOUNT_SID,
+      TWILIO_API_KEY_SID,
+      TWILIO_API_KEY_SECRET,
+      { identity } // Benutzername
     );
 
     // Dem Token Zugriff auf diesen Raum geben
@@ -64,4 +80,3 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Server läuft auf Port ${port}`);
 });
-
