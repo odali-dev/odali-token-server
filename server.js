@@ -79,6 +79,19 @@ app.post('/token', (req, res) => {
 const users = new Map(); // username -> { password, friends:Set<string>, incoming:Set<string>, outgoing:Set<string> }
 const onlineUsers = new Map(); // username -> socketId
 
+// Chat-Nachrichten: { id, from, to, text, createdAt }
+let messages = [];
+
+// Nachrichten max. 2 Tage behalten
+const MESSAGE_TTL_MS = 2 * 24 * 60 * 60 * 1000;
+
+function cleanupOldMessages() {
+  const cutoff = Date.now() - MESSAGE_TTL_MS;
+  messages = messages.filter((m) => m.createdAt > cutoff);
+}
+
+setInterval(cleanupOldMessages, 60 * 60 * 1000); // alle Stunde
+
 function ensureUser(username) {
   if (!users.has(username)) {
     users.set(username, {
@@ -92,16 +105,68 @@ function ensureUser(username) {
 }
 
 // --------------------------------------
-// Auth
+// HTTP-Auth für Chat-API (sehr simpel)
+// --------------------------------------
+//
+// Erwartet: Authorization: Bearer <username>
+// (username ist derselbe, den du beim Login benutzt)
+
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers['authorization'] || '';
+  const [, token] = authHeader.split(' '); // "Bearer xxx"
+
+  if (!token) {
+    return res.status(401).json({ error: 'Kein Token / kein Username' });
+  }
+
+  const userId = token.trim().toLowerCase();
+  if (!userId) {
+    return res.status(401).json({ error: 'Ungültiger Token' });
+  }
+
+  if (!users.has(userId)) {
+    return res.status(401).json({ error: 'User existiert hier nicht' });
+  }
+
+  req.userId = userId;
+  next();
+}
+
+// --------------------------------------
+// Helper für Chat
+// --------------------------------------
+
+function getConversation(userA, userB) {
+  return messages
+    .filter(
+      (m) =>
+        (m.from === userA && m.to === userB) ||
+        (m.from === userB && m.to === userA)
+    )
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+function getUserContacts(userId) {
+  // primär: Freunde-Liste
+  const user = ensureUser(userId);
+  const contacts = new Set(user.friends);
+
+  // plus alle, mit denen schon geschrieben wurde
+  messages.forEach((m) => {
+    if (m.from === userId) contacts.add(m.to);
+    if (m.to === userId) contacts.add(m.from);
+  });
+
+  contacts.delete(userId);
+  return Array.from(contacts);
+}
+
+// --------------------------------------
+// Auth (HTTP) – Register / Login
 // --------------------------------------
 //
 // POST /register { username, password }
-// – existiert user bereits: 409
-// – sonst: neuer User
-//
-// POST /login { username, password }
-// – existiert user nicht: 404
-// – passwort falsch: 401
+// POST /login    { username, password }
 
 app.post('/register', (req, res) => {
   const { username, password } = req.body || {};
@@ -153,6 +218,7 @@ app.post('/login', (req, res) => {
     return res.status(401).json({ error: 'password gabim' });
   }
 
+  // Frontend speichert "name" in localStorage und schickt ihn als Bearer-Token
   res.json({ username: name });
 });
 
@@ -275,6 +341,104 @@ app.post('/friends/accept', (req, res) => {
 });
 
 // --------------------------------------
+// Chat-API (für mesazhe.html)
+// --------------------------------------
+//
+// Erwartet immer Authorization: Bearer <username>
+// und nutzt die Freunde-Liste als "Kontakte".
+// --------------------------------------
+
+// Healthcheck
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'odali-token-server + chat' });
+});
+
+// Liste der Kontakte (Freunde + evtl. Chat-Partner)
+app.get('/api/contacts', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const contacts = getUserContacts(userId).map((id) => {
+    const conv = getConversation(userId, id);
+    const lastMessage = conv[conv.length - 1];
+
+    return {
+      id,
+      displayName: id, // später z.B. "richtiger Name"
+      lastMessagePreview: lastMessage ? lastMessage.text.slice(0, 50) : null,
+      lastMessageAt: lastMessage ? lastMessage.createdAt : null,
+      unreadCount: 0 // kannst du später erweitern
+    };
+  });
+
+  res.json(contacts);
+});
+
+// Nachrichten mit einem Kontakt
+app.get('/api/messages/:contactId', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const contactId = (req.params.contactId || '').trim().toLowerCase();
+
+  if (!contactId || !users.has(contactId)) {
+    return res.status(404).json({ error: 'Kontakt nicht gefunden' });
+  }
+
+  const user = ensureUser(userId);
+
+  // nur mit Freunden chatten
+  if (!user.friends.has(contactId)) {
+    return res
+      .status(403)
+      .json({ error: 'knaqësi, po nuk jeni shokë – s\'munesh me shkru' });
+  }
+
+  const conv = getConversation(userId, contactId);
+  res.json(conv);
+});
+
+// Neue Nachricht senden
+app.post('/api/messages', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const { to, text } = req.body || {};
+
+  if (!to || !text || !text.trim()) {
+    return res.status(400).json({ error: 'to und text erforderlich' });
+  }
+
+  const toName = String(to).trim().toLowerCase();
+  const msgText = String(text).slice(0, 2000);
+
+  if (!users.has(toName)) {
+    return res.status(404).json({ error: 'Empfänger existiert nicht' });
+  }
+
+  const fromUser = ensureUser(userId);
+
+  // nur mit Freunden chatten
+  if (!fromUser.friends.has(toName)) {
+    return res
+      .status(403)
+      .json({ error: 's\'munesh me shkru dikujt që s\'është shok' });
+  }
+
+  const msg = {
+    id: String(Date.now()) + '-' + Math.random().toString(16).slice(2),
+    from: userId,
+    to: toName,
+    text: msgText,
+    createdAt: Date.now()
+  };
+
+  messages.push(msg);
+
+  // optional: Socket-Event an Empfänger
+  const targetSocket = onlineUsers.get(toName);
+  if (targetSocket) {
+    io.to(targetSocket).emit('newMessage', msg);
+  }
+
+  res.json({ ok: true, message: msg });
+});
+
+// --------------------------------------
 // Socket.io – Online Status & Calls
 // --------------------------------------
 
@@ -284,7 +448,7 @@ io.on('connection', (socket) => {
   let username = null;
 
   socket.on('register', (data) => {
-    username = (data && data.username || '').trim().toLowerCase();
+    username = ((data && data.username) || '').trim().toLowerCase();
     if (!username) return;
 
     onlineUsers.set(username, socket.id);
