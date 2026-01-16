@@ -5,6 +5,8 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const twilio = require('twilio');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -69,11 +71,10 @@ app.post('/token', (req, res) => {
 });
 
 // --------------------------------------
-// In-Memory "Datenbank"
+// In-Memory "Datenbank" + Persistenz
 // --------------------------------------
 //
 // ACHTUNG: das ist nur für Demo/Dev.
-// Wenn der Server neu startet, ist alles weg.
 // Für "echte" Persistenz bitte später eine DB nehmen (z.B. Postgres, SQLite).
 
 const users = new Map(); // username -> { password, friends:Set<string>, incoming:Set<string>, outgoing:Set<string> }
@@ -82,12 +83,83 @@ const onlineUsers = new Map(); // username -> socketId
 // Chat-Nachrichten: { id, from, to, text, createdAt }
 let messages = [];
 
+// Datei für Persistenz
+const DATA_FILE = path.join(__dirname, 'data.json');
+
+function saveToDisk() {
+  const plainUsers = {};
+  for (const [name, u] of users.entries()) {
+    plainUsers[name] = {
+      password: u.password,
+      friends: Array.from(u.friends),
+      incoming: Array.from(u.incoming),
+      outgoing: Array.from(u.outgoing)
+    };
+  }
+
+  const payload = {
+    users: plainUsers,
+    messages
+  };
+
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2), 'utf8');
+    console.log('💾 Daten gespeichert in', DATA_FILE);
+  } catch (err) {
+    console.error('❌ Konnte Daten nicht speichern:', err);
+  }
+}
+
+function loadFromDisk() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) {
+      console.log('ℹ️ keine data.json gefunden – starte mit leerem Zustand');
+      return;
+    }
+
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    const data = JSON.parse(raw);
+
+    // users wiederherstellen
+    if (data.users && typeof data.users === 'object') {
+      for (const [name, u] of Object.entries(data.users)) {
+        users.set(name, {
+          password: u.password,
+          friends: new Set(u.friends || []),
+          incoming: new Set(u.incoming || []),
+          outgoing: new Set(u.outgoing || [])
+        });
+      }
+    }
+
+    // messages wiederherstellen
+    if (Array.isArray(data.messages)) {
+      messages = data.messages;
+    }
+
+    console.log(
+      `✅ Daten geladen: ${users.size} User, ${messages.length} Messages`
+    );
+  } catch (err) {
+    console.error('❌ Konnte data.json nicht laden:', err);
+  }
+}
+
+// Beim Start Daten laden
+loadFromDisk();
+
 // Nachrichten max. 2 Tage behalten
 const MESSAGE_TTL_MS = 2 * 24 * 60 * 60 * 1000;
 
 function cleanupOldMessages() {
   const cutoff = Date.now() - MESSAGE_TTL_MS;
+  const before = messages.length;
   messages = messages.filter((m) => m.createdAt > cutoff);
+  const after = messages.length;
+  if (after !== before) {
+    console.log(`🧹 alte Nachrichten gelöscht: ${before - after} entfernt`);
+    saveToDisk();
+  }
 }
 
 setInterval(cleanupOldMessages, 60 * 60 * 1000); // alle Stunde
@@ -194,6 +266,8 @@ app.post('/register', (req, res) => {
 
   console.log(`👤 New user registered: ${name}`);
 
+  saveToDisk(); // PERSISTENZ
+
   res.json({ username: name });
 });
 
@@ -285,6 +359,8 @@ app.post('/friends/request', (req, res) => {
     });
   }
 
+  saveToDisk(); // PERSISTENZ
+
   res.json({ ok: true });
 });
 
@@ -336,6 +412,8 @@ app.post('/friends/accept', (req, res) => {
     io.to(toSocketId).emit('friendUpdate', { user: toName });
     io.to(toSocketId).emit('friendAccepted', { from: fromName });
   }
+
+  saveToDisk(); // PERSISTENZ
 
   res.json({ ok: true });
 });
@@ -429,6 +507,8 @@ app.post('/api/messages', authMiddleware, (req, res) => {
 
   messages.push(msg);
 
+  saveToDisk(); // PERSISTENZ
+
   // optional: Socket-Event an Empfänger
   const targetSocket = onlineUsers.get(toName);
   if (targetSocket) {
@@ -490,7 +570,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 🔴 NEU: Echtzeit-Chat über Socket.io
+  // Echtzeit-Chat über Socket.io
   socket.on('chatMessage', ({ from, to, text, time }) => {
     if (!from || !to || !text || !text.trim()) return;
 
@@ -519,6 +599,7 @@ io.on('connection', (socket) => {
     };
 
     messages.push(msg);
+    saveToDisk(); // PERSISTENZ
 
     // an Empfänger senden, falls online
     const targetSocket = onlineUsers.get(toName);
@@ -529,9 +610,6 @@ io.on('connection', (socket) => {
         time: ts
       });
     }
-
-    // optional: könnte man auch an Sender echoen,
-    // aber dein Frontend speichert sie schon lokal.
   });
 
   socket.on('disconnect', () => {
@@ -550,4 +628,3 @@ const port = PORT || 4000;
 server.listen(port, () => {
   console.log(`🚀 odali-token-server läuft auf Port ${port}`);
 });
-
