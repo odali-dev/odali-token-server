@@ -521,7 +521,6 @@ app.post('/api/messages', authMiddleware, (req, res) => {
 // --------------------------------------
 // Socket.io – Online Status & Calls + Chat
 // --------------------------------------
-
 io.on('connection', (socket) => {
   console.log('🔌 socket connected', socket.id);
 
@@ -529,15 +528,17 @@ io.on('connection', (socket) => {
 
   socket.on('register', (data) => {
     username = ((data && data.username) || '').trim().toLowerCase();
-    if (!username) return;
+    if (!username) {
+      console.log('⚠️ register ohne gültigen username vom Socket', socket.id, data);
+      return;
+    }
 
     onlineUsers.set(username, socket.id);
     ensureUser(username);
     console.log(`✅ ${username} online (socket ${socket.id})`);
   });
 
-  // Call Signaling
-  // "caller" sendet callUser -> server -> forward an "callee"
+  // Call Signaling (unverändert)
   socket.on('callUser', ({ from, to, roomName }) => {
     const fromName = (from || '').trim().toLowerCase();
     const toName = (to || '').trim().toLowerCase();
@@ -546,6 +547,7 @@ io.on('connection', (socket) => {
     if (!fromName || !toName || !room) return;
 
     const targetSocket = onlineUsers.get(toName);
+    console.log('📞 callUser', { fromName, toName, room, targetSocket });
     if (targetSocket) {
       io.to(targetSocket).emit('incomingCall', {
         from: fromName,
@@ -554,13 +556,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Optional: "answerCall" – falls du Rückmeldung brauchst
   socket.on('answerCall', ({ from, to, roomName, accepted }) => {
     const fromName = (from || '').trim().toLowerCase();
     const toName = (to || '').trim().toLowerCase();
     const room = (roomName || '').trim();
 
     const targetSocket = onlineUsers.get(toName);
+    console.log('📞 answerCall', { fromName, toName, room, accepted, targetSocket });
     if (targetSocket) {
       io.to(targetSocket).emit('callAnswered', {
         from: fromName,
@@ -569,6 +571,88 @@ io.on('connection', (socket) => {
       });
     }
   });
+
+  // 💬 Echtzeit-Chat über Socket.io – mit Debug-Logs
+  socket.on('chatMessage', ({ from, to, text, time }) => {
+    console.log('➡️ chatMessage eingegangen', { from, to, text, time });
+
+    if (!from || !to || !text || !text.trim()) {
+      console.log('⚠️ chatMessage verworfen: fehlende Felder');
+      return;
+    }
+
+    const fromName = String(from).trim().toLowerCase();
+    const toName = String(to).trim().toLowerCase();
+    const msgText = String(text).slice(0, 2000);
+    const ts = time || Date.now();
+
+    if (!users.has(fromName) || !users.has(toName)) {
+      console.log('⚠️ chatMessage verworfen: unbekannter User', {
+        fromName,
+        hasFrom: users.has(fromName),
+        toName,
+        hasTo: users.has(toName)
+      });
+      return;
+    }
+
+    const fromUser = ensureUser(fromName);
+
+    // DEBUG: Freundesliste loggen
+    console.log('👥 friend check', {
+      fromName,
+      toName,
+      friendsOfFrom: Array.from(fromUser.friends)
+    });
+
+    // Wenn du sicher weißt, dass sie Freunde sind, kannst du das auch
+    // TEMPORÄR auskommentieren zum Testen.
+    if (!fromUser.friends.has(toName)) {
+      console.log('⛔ chatMessage geblockt: keine Freundschaft', { fromName, toName });
+      return;
+    }
+
+    const msg = {
+      id: String(Date.now()) + '-' + Math.random().toString(16).slice(2),
+      from: fromName,
+      to: toName,
+      text: msgText,
+      createdAt: ts
+    };
+
+    messages.push(msg);
+    saveToDisk();
+    console.log('💾 chatMessage gespeichert & weiterleiten', msg);
+
+    const targetSocket = onlineUsers.get(toName);
+    console.log('🎯 Ziel-Socket für Empfänger', { toName, targetSocket });
+
+    if (targetSocket) {
+      io.to(targetSocket).emit('chatMessage', {
+        from: fromName,
+        text: msgText,
+        time: ts
+      });
+    } else {
+      console.log('📭 Empfänger ist offline oder nicht registriert', toName);
+    }
+
+    // Optional: auch an den Sender zurückschicken (damit beide denselben Weg nutzen)
+    io.to(socket.id).emit('chatMessage', {
+      from: fromName,
+      text: msgText,
+      time: ts
+    });
+  });
+
+  socket.on('disconnect', () => {
+    console.log('🔌 socket disconnected', socket.id, 'username:', username);
+    if (username && onlineUsers.get(username) === socket.id) {
+      onlineUsers.delete(username);
+      console.log(`🚪 ${username} offline`);
+    }
+  });
+});
 
   // Echtzeit-Chat über Socket.io
   socket.on('chatMessage', ({ from, to, text, time }) => {
