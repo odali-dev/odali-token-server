@@ -439,7 +439,7 @@ app.post('/api/messages', authMiddleware, (req, res) => {
 });
 
 // --------------------------------------
-// Socket.io – Online Status & Calls
+// Socket.io – Online Status & Calls + Chat
 // --------------------------------------
 
 io.on('connection', (socket) => {
@@ -490,6 +490,50 @@ io.on('connection', (socket) => {
     }
   });
 
+  // 🔴 NEU: Echtzeit-Chat über Socket.io
+  socket.on('chatMessage', ({ from, to, text, time }) => {
+    if (!from || !to || !text || !text.trim()) return;
+
+    const fromName = String(from).trim().toLowerCase();
+    const toName = String(to).trim().toLowerCase();
+    const msgText = String(text).slice(0, 2000);
+    const ts = time || Date.now();
+
+    if (!users.has(fromName) || !users.has(toName)) {
+      return;
+    }
+
+    const fromUser = ensureUser(fromName);
+
+    // nur mit Freunden chatten (gleiche Logik wie /api/messages)
+    if (!fromUser.friends.has(toName)) {
+      return;
+    }
+
+    const msg = {
+      id: String(Date.now()) + '-' + Math.random().toString(16).slice(2),
+      from: fromName,
+      to: toName,
+      text: msgText,
+      createdAt: ts
+    };
+
+    messages.push(msg);
+
+    // an Empfänger senden, falls online
+    const targetSocket = onlineUsers.get(toName);
+    if (targetSocket) {
+      io.to(targetSocket).emit('chatMessage', {
+        from: fromName,
+        text: msgText,
+        time: ts
+      });
+    }
+
+    // optional: könnte man auch an Sender echoen,
+    // aber dein Frontend speichert sie schon lokal.
+  });
+
   socket.on('disconnect', () => {
     if (username && onlineUsers.get(username) === socket.id) {
       onlineUsers.delete(username);
@@ -506,3 +550,4 @@ const port = PORT || 4000;
 server.listen(port, () => {
   console.log(`🚀 odali-token-server läuft auf Port ${port}`);
 });
+
