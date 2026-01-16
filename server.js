@@ -303,6 +303,7 @@ app.post('/login', (req, res) => {
 // GET /friends?username=...
 // POST /friends/request  { from, to }
 // POST /friends/accept   { from, to }
+// POST /friends/add      { from, to }  // neu: direkte Freundschaft
 
 app.get('/friends', (req, res) => {
   const username = (req.query.username || '').trim().toLowerCase();
@@ -397,7 +398,7 @@ app.post('/friends/accept', (req, res) => {
   fromUser.friends.add(toName);
   toUser.friends.add(fromName);
 
-  // Optional: pending auch bei dem anderen User aufräumen
+  // Aufräumen
   fromUser.outgoing.delete(toName);
   toUser.incoming.delete(fromName);
 
@@ -416,6 +417,61 @@ app.post('/friends/accept', (req, res) => {
   saveToDisk(); // PERSISTENZ
 
   res.json({ ok: true });
+});
+
+// NEU: direkte Freundschaft hinzufügen (für dein "Freund eintippen & adden" Feld)
+app.post('/friends/add', (req, res) => {
+  const { from, to } = req.body || {};
+  if (!from || !to) {
+    return res.status(400).json({ error: 'from und to sind nötig' });
+  }
+
+  const fromName = from.trim().toLowerCase();
+  const toName = to.trim().toLowerCase();
+
+  if (fromName === toName) {
+    return res.status(400).json({ error: 's\'munesh me shtu vetveten' });
+  }
+
+  if (!users.has(fromName) || !users.has(toName)) {
+    return res.status(404).json({ error: 'user jo valid' });
+  }
+
+  const fromUser = ensureUser(fromName);
+  const toUser = ensureUser(toName);
+
+  // Bereits Freunde?
+  if (fromUser.friends.has(toName) && toUser.friends.has(fromName)) {
+    return res.json({ ok: true, info: 'veç jeni shokë' });
+  }
+
+  // Freundschaft bidirektional
+  fromUser.friends.add(toName);
+  toUser.friends.add(fromName);
+
+  // evtl. alte Requests aufräumen
+  fromUser.incoming.delete(toName);
+  fromUser.outgoing.delete(toName);
+  toUser.incoming.delete(fromName);
+  toUser.outgoing.delete(fromName);
+
+  saveToDisk(); // PERSISTENZ
+
+  const fromSocketId = onlineUsers.get(fromName);
+  const toSocketId = onlineUsers.get(toName);
+
+  if (fromSocketId) {
+    io.to(fromSocketId).emit('friendUpdate', { user: fromName });
+  }
+  if (toSocketId) {
+    io.to(toSocketId).emit('friendUpdate', { user: toName });
+  }
+
+  return res.json({
+    ok: true,
+    friendsOfFrom: Array.from(fromUser.friends),
+    friendsOfTo: Array.from(toUser.friends)
+  });
 });
 
 // --------------------------------------
@@ -512,63 +568,109 @@ app.post('/api/messages', authMiddleware, (req, res) => {
   // optional: Socket-Event an Empfänger
   const targetSocket = onlineUsers.get(toName);
   if (targetSocket) {
-    io.to(targetSocket).emit('newMessage', msg);
+    io.to(targetSocket).emit('chatMessage', {
+      from: userId,
+      text: msgText,
+      time: msg.createdAt
+    });
   }
 
   res.json({ ok: true, message: msg });
 });
 
-socket.on('chatMessage', ({ from, to, text, time }) => {
-  console.log('➡️ chatMessage eingegangen', { from, to, text, time });
+// --------------------------------------
+// Socket.io – Echtzeit
+// --------------------------------------
 
-  if (!from || !to || !text || !text.trim()) {
-    console.log('⚠️ chatMessage verworfen: fehlende Felder');
-    return;
-  }
+io.on('connection', (socket) => {
+  console.log('🔌 new socket connected:', socket.id);
+  let username = null;
 
-  const fromName = String(from).trim().toLowerCase();
-  const toName = String(to).trim().toLowerCase();
-  const msgText = String(text).slice(0, 2000);
-  const ts = time || Date.now();
+  // Client sendet: socket.emit('register', { username })
+  socket.on('register', ({ username: rawName }) => {
+    if (!rawName) return;
+    const name = String(rawName).trim().toLowerCase();
+    username = name;
 
-  // User notfalls automatisch anlegen (nur fürs Chatten)
-  ensureUser(fromName);
-  ensureUser(toName);
+    // sicherstellen, dass User existiert
+    ensureUser(name);
 
-  const msg = {
-    id: String(Date.now()) + '-' + Math.random().toString(16).slice(2),
-    from: fromName,
-    to: toName,
-    text: msgText,
-    createdAt: ts
-  };
+    onlineUsers.set(name, socket.id);
+    console.log(`✅ Socket registriert: ${name} -> ${socket.id}`);
+  });
 
-  messages.push(msg);
-  saveToDisk();
-  console.log('💾 chatMessage gespeichert', msg);
+  // 💬 Echtzeit-Chat über Socket.io
+  socket.on('chatMessage', ({ from, to, text, time }) => {
+    console.log('➡️ chatMessage eingegangen', { from, to, text, time });
 
-  const targetSocket = onlineUsers.get(toName);
-  console.log('🎯 Ziel-Socket für Empfänger', { toName, targetSocket });
+    if (!from || !to || !text || !text.trim()) {
+      console.log('⚠️ chatMessage verworfen: fehlende Felder');
+      return;
+    }
 
-  if (targetSocket) {
-    io.to(targetSocket).emit('chatMessage', {
+    const fromName = String(from).trim().toLowerCase();
+    const toName = String(to).trim().toLowerCase();
+    const msgText = String(text).slice(0, 2000);
+    const ts = time || Date.now();
+
+    if (!users.has(fromName) || !users.has(toName)) {
+      console.log('⚠️ chatMessage verworfen: unbekannter User', {
+        fromName,
+        hasFrom: users.has(fromName),
+        toName,
+        hasTo: users.has(toName)
+      });
+      return;
+    }
+
+    const fromUser = ensureUser(fromName);
+
+    console.log('👥 friend check', {
+      fromName,
+      toName,
+      friendsOfFrom: Array.from(fromUser.friends)
+    });
+
+    // nur mit Freunden chatten
+    if (!fromUser.friends.has(toName)) {
+      console.log('⛔ chatMessage geblockt: keine Freundschaft', { fromName, toName });
+      return;
+    }
+
+    const msg = {
+      id: String(Date.now()) + '-' + Math.random().toString(16).slice(2),
+      from: fromName,
+      to: toName,
+      text: msgText,
+      createdAt: ts
+    };
+
+    messages.push(msg);
+    saveToDisk();
+    console.log('💾 chatMessage gespeichert & weiterleiten', msg);
+
+    const targetSocket = onlineUsers.get(toName);
+    console.log('🎯 Ziel-Socket für Empfänger', { toName, targetSocket });
+
+    if (targetSocket) {
+      io.to(targetSocket).emit('chatMessage', {
+        from: fromName,
+        text: msgText,
+        time: ts
+      });
+    } else {
+      console.log('📭 Empfänger ist offline oder nicht registriert', toName);
+    }
+
+    // Optional: auch an den Sender zurückschicken
+    io.to(socket.id).emit('chatMessage', {
       from: fromName,
       text: msgText,
       time: ts
     });
-  } else {
-    console.log('📭 Empfänger ist offline oder nicht registriert', toName);
-  }
-
-  // Optional: an den Sender zurück (falls du es im Frontend nutzen willst)
-  io.to(socket.id).emit('chatMessage', {
-    from: fromName,
-    text: msgText,
-    time: ts
   });
-});
 
-  // Call Signaling (unverändert)
+  // Call Signaling
   socket.on('callUser', ({ from, to, roomName }) => {
     const fromName = (from || '').trim().toLowerCase();
     const toName = (to || '').trim().toLowerCase();
@@ -602,131 +704,8 @@ socket.on('chatMessage', ({ from, to, text, time }) => {
     }
   });
 
-  // 💬 Echtzeit-Chat über Socket.io – mit Debug-Logs
-  socket.on('chatMessage', ({ from, to, text, time }) => {
-    console.log('➡️ chatMessage eingegangen', { from, to, text, time });
-
-    if (!from || !to || !text || !text.trim()) {
-      console.log('⚠️ chatMessage verworfen: fehlende Felder');
-      return;
-    }
-
-    const fromName = String(from).trim().toLowerCase();
-    const toName = String(to).trim().toLowerCase();
-    const msgText = String(text).slice(0, 2000);
-    const ts = time || Date.now();
-
-    if (!users.has(fromName) || !users.has(toName)) {
-      console.log('⚠️ chatMessage verworfen: unbekannter User', {
-        fromName,
-        hasFrom: users.has(fromName),
-        toName,
-        hasTo: users.has(toName)
-      });
-      return;
-    }
-
-    const fromUser = ensureUser(fromName);
-
-    // DEBUG: Freundesliste loggen
-    console.log('👥 friend check', {
-      fromName,
-      toName,
-      friendsOfFrom: Array.from(fromUser.friends)
-    });
-
-    // Wenn du sicher weißt, dass sie Freunde sind, kannst du das auch
-    // TEMPORÄR auskommentieren zum Testen.
-    if (!fromUser.friends.has(toName)) {
-      console.log('⛔ chatMessage geblockt: keine Freundschaft', { fromName, toName });
-      return;
-    }
-
-    const msg = {
-      id: String(Date.now()) + '-' + Math.random().toString(16).slice(2),
-      from: fromName,
-      to: toName,
-      text: msgText,
-      createdAt: ts
-    };
-
-    messages.push(msg);
-    saveToDisk();
-    console.log('💾 chatMessage gespeichert & weiterleiten', msg);
-
-    const targetSocket = onlineUsers.get(toName);
-    console.log('🎯 Ziel-Socket für Empfänger', { toName, targetSocket });
-
-    if (targetSocket) {
-      io.to(targetSocket).emit('chatMessage', {
-        from: fromName,
-        text: msgText,
-        time: ts
-      });
-    } else {
-      console.log('📭 Empfänger ist offline oder nicht registriert', toName);
-    }
-
-    // Optional: auch an den Sender zurückschicken (damit beide denselben Weg nutzen)
-    io.to(socket.id).emit('chatMessage', {
-      from: fromName,
-      text: msgText,
-      time: ts
-    });
-  });
-
   socket.on('disconnect', () => {
     console.log('🔌 socket disconnected', socket.id, 'username:', username);
-    if (username && onlineUsers.get(username) === socket.id) {
-      onlineUsers.delete(username);
-      console.log(`🚪 ${username} offline`);
-    }
-  });
-});
-
-  // Echtzeit-Chat über Socket.io
-  socket.on('chatMessage', ({ from, to, text, time }) => {
-    if (!from || !to || !text || !text.trim()) return;
-
-    const fromName = String(from).trim().toLowerCase();
-    const toName = String(to).trim().toLowerCase();
-    const msgText = String(text).slice(0, 2000);
-    const ts = time || Date.now();
-
-    if (!users.has(fromName) || !users.has(toName)) {
-      return;
-    }
-
-    const fromUser = ensureUser(fromName);
-
-    // nur mit Freunden chatten (gleiche Logik wie /api/messages)
-    if (!fromUser.friends.has(toName)) {
-      return;
-    }
-
-    const msg = {
-      id: String(Date.now()) + '-' + Math.random().toString(16).slice(2),
-      from: fromName,
-      to: toName,
-      text: msgText,
-      createdAt: ts
-    };
-
-    messages.push(msg);
-    saveToDisk(); // PERSISTENZ
-
-    // an Empfänger senden, falls online
-    const targetSocket = onlineUsers.get(toName);
-    if (targetSocket) {
-      io.to(targetSocket).emit('chatMessage', {
-        from: fromName,
-        text: msgText,
-        time: ts
-      });
-    }
-  });
-
-  socket.on('disconnect', () => {
     if (username && onlineUsers.get(username) === socket.id) {
       onlineUsers.delete(username);
       console.log(`🚪 ${username} offline`);
