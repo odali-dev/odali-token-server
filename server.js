@@ -518,25 +518,55 @@ app.post('/api/messages', authMiddleware, (req, res) => {
   res.json({ ok: true, message: msg });
 });
 
-// --------------------------------------
-// Socket.io – Online Status & Calls + Chat
-// --------------------------------------
-io.on('connection', (socket) => {
-  console.log('🔌 socket connected', socket.id);
+socket.on('chatMessage', ({ from, to, text, time }) => {
+  console.log('➡️ chatMessage eingegangen', { from, to, text, time });
 
-  let username = null;
+  if (!from || !to || !text || !text.trim()) {
+    console.log('⚠️ chatMessage verworfen: fehlende Felder');
+    return;
+  }
 
-  socket.on('register', (data) => {
-    username = ((data && data.username) || '').trim().toLowerCase();
-    if (!username) {
-      console.log('⚠️ register ohne gültigen username vom Socket', socket.id, data);
-      return;
-    }
+  const fromName = String(from).trim().toLowerCase();
+  const toName = String(to).trim().toLowerCase();
+  const msgText = String(text).slice(0, 2000);
+  const ts = time || Date.now();
 
-    onlineUsers.set(username, socket.id);
-    ensureUser(username);
-    console.log(`✅ ${username} online (socket ${socket.id})`);
+  // User notfalls automatisch anlegen (nur fürs Chatten)
+  ensureUser(fromName);
+  ensureUser(toName);
+
+  const msg = {
+    id: String(Date.now()) + '-' + Math.random().toString(16).slice(2),
+    from: fromName,
+    to: toName,
+    text: msgText,
+    createdAt: ts
+  };
+
+  messages.push(msg);
+  saveToDisk();
+  console.log('💾 chatMessage gespeichert', msg);
+
+  const targetSocket = onlineUsers.get(toName);
+  console.log('🎯 Ziel-Socket für Empfänger', { toName, targetSocket });
+
+  if (targetSocket) {
+    io.to(targetSocket).emit('chatMessage', {
+      from: fromName,
+      text: msgText,
+      time: ts
+    });
+  } else {
+    console.log('📭 Empfänger ist offline oder nicht registriert', toName);
+  }
+
+  // Optional: an den Sender zurück (falls du es im Frontend nutzen willst)
+  io.to(socket.id).emit('chatMessage', {
+    from: fromName,
+    text: msgText,
+    time: ts
   });
+});
 
   // Call Signaling (unverändert)
   socket.on('callUser', ({ from, to, roomName }) => {
